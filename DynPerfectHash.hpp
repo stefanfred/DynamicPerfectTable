@@ -13,16 +13,20 @@
 inline uint64_t computeM_u32(uint32_t d) {
     return UINT64_C(0xFFFFFFFFFFFFFFFF) / d + 1;
 }
+
 inline uint64_t mul128_u32(uint64_t lowbits, uint32_t d) {
     return ((__uint128_t) lowbits * d) >> 64;
 }
+
 inline uint32_t fastdiv_u32(uint32_t a, uint64_t M) {
     return (uint32_t) (mul128_u32(M, a));
 }
+
 inline uint32_t fastmod_u32(uint32_t a, uint64_t M, uint32_t d) {
     uint64_t lowbits = M * a;
     return (uint32_t) (mul128_u32(lowbits, d));
 }
+
 
 template<typename H, typename V>
 class DynPerfectHashTable {
@@ -33,8 +37,9 @@ private:
     size_t capacity;
     std::vector<S> seeds;
     std::vector<H> keys;
+    std::vector<bool> occupiedKeys;
     std::vector<V> values;
-    std::vector<bool> occupied;
+    std::vector<bool> occupiedValues;
     static constexpr uint64_t lambda_log = 2;
     static constexpr double maxLoad = 0.50;
     uint64_t bucketMask;
@@ -43,16 +48,41 @@ private:
     uint64_t slotM;
     uint64_t bucketM;
 
+
+    void addToKeyStorage(H key, size_t bucketIndex) {
+        size_t pos = bucketIndex % capacity; // ToDo
+        while (occupiedKeys[pos]) pos = (pos + 1) % capacity;
+        occupiedKeys[pos] = true;
+        keys[pos] = key;
+    }
+
+    void removeFromKeyStorage(H key, size_t bucketIndex) {
+        //ToDo
+    }
+
+    void getAllKeysOfBucket(size_t bucketIndex, std::vector<H> &keyPointer) {
+        size_t pos = bucketIndex % capacity; // ToDo
+        H key;
+        while (occupiedKeys[pos] && getBucket((key = keys[pos])) != bucketIndex) pos = (pos + 1) % capacity;
+        if(!occupiedKeys[pos]) {
+            return;
+        }
+        do {
+            keyPointer.push_back(key);
+            pos = (pos + 1) % capacity;
+        } while (occupiedKeys[pos] && getBucket((key = keys[pos])) == bucketIndex);
+    }
+
     inline size_t getSlot(H h, S s) {
         auto i = s ^ h;
-        i = (i*i)>>32;
-        return (i*capacity)>>32;
+        i = (i * i) >> 32;
+        return (i * capacity) >> 32;
         //return fastmod_u32(uint32_t((i*i)>>32), slotM, capacity);
         //return (i * i) >> slotShift;
     }
 
     inline size_t getBucket(H h) {
-        return (uint32_t(h) * bucketCount)>>32;
+        return (uint32_t(h) * bucketCount) >> 32;
         //return fastmod_u32(uint32_t(h), bucketM, bucketCount);
         //return h & bucketMask;
     }
@@ -86,7 +116,12 @@ private:
         seeds.resize(bucketCount);
         keys.resize(capacity);
         values.resize(capacity);
-        occupied.resize(capacity);
+        occupiedValues.resize(capacity);
+        occupiedKeys.resize(capacity);
+    }
+
+    bool searchBucketHeuristically(const std::vector<std::tuple<H, V>> &pairs, size_t bucketIndex) {
+
     }
 
     bool searchBucket(const std::vector<std::tuple<H, V>> &pairs, size_t bucketIndex) {
@@ -97,7 +132,7 @@ private:
             for (size_t i = 0; i < pairs.size(); i++) {
                 const std::tuple<H, V> &p = pairs[i];
                 size_t slot = getSlot(std::get<0>(p), seed);
-                if (occupied[slot]) {
+                if (occupiedValues[slot]) {
                     succ = false;
                     break;
                 }
@@ -107,14 +142,14 @@ private:
                 for (size_t i = 0; i < pairs.size(); i++) {
                     const std::tuple<H, V> &p = pairs[i];
                     const size_t slot = slots[i];
-                    keys[slot] = std::get<0>(p);
+                    addToKeyStorage(std::get<0>(p), bucketIndex);
                     values[slot] = std::get<1>(p);
                 }
                 std::sort(slots.begin(), slots.end());
                 if (std::unique(slots.begin(), slots.end()) == slots.end()) {
                     seeds[bucketIndex] = seed;
                     for (const auto slot: slots) {
-                        occupied[slot] = true;
+                        occupiedValues[slot] = true;
                     }
                     return true;
                 }
@@ -156,7 +191,7 @@ public:
         }
 
         std::cout << "Bits " << (sizeof(S) * 8 >> lambda_log) << std::endl;
-        std::cout << "Load " << (double(n)/double(capacity)) << std::endl;
+        std::cout << "Load " << (double(n) / double(capacity)) << std::endl;
     }
 
     inline size_t query(H h) {

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <limits>
 #include <iostream>
+#include <random>
 
 
 inline uint64_t computeM_u32(uint32_t d) {
@@ -27,11 +28,13 @@ inline uint32_t fastmod_u32(uint32_t a, uint64_t M, uint32_t d) {
     return (uint32_t) (mul128_u32(lowbits, d));
 }
 
+//#define POWER_OF_TWO_CAPACITY
 
 template<typename H, typename V>
 class DynPerfectHashTable {
 private:
     typedef uint8_t S;
+    typedef uint32_t P;
     size_t n;
     size_t bucketCount;
     size_t capacity;
@@ -40,91 +43,202 @@ private:
     std::vector<bool> occupiedKeys;
     std::vector<V> values;
     std::vector<bool> occupiedValues;
+    std::vector<P> bucketPointer;
+    static constexpr double maxLoad = 0.85;
+
+#ifdef POWER_OF_TWO_CAPACITY
     static constexpr uint64_t lambda_log = 2;
-    static constexpr double maxLoad = 0.50;
     uint64_t bucketMask;
     uint64_t slotShift;
+#else
+    static constexpr double lambda = 4;
+#endif
 
-    uint64_t slotM;
-    uint64_t bucketM;
+
+    std::random_device rd;     // Only used once to initialise (seed) engine
+    std::mt19937 rng;    // Random-number engine used (Mersenne-Twister in this case)
+    std::uniform_int_distribution<S> uni; // Guaranteed unbiased
 
 
     void addToKeyStorage(H key, size_t bucketIndex) {
-        size_t pos = bucketIndex % capacity; // ToDo
-        while (occupiedKeys[pos]) pos = (pos + 1) % capacity;
+        size_t pos = bucketIndex * capacity / bucketCount; // ToDo
+        while (occupiedKeys[pos]) pos = (pos + 1 == capacity) ? 0 : (pos + 1);
         occupiedKeys[pos] = true;
         keys[pos] = key;
     }
 
     void removeFromKeyStorage(H key, size_t bucketIndex) {
         //ToDo
+
+
     }
 
-    void getAllKeysOfBucket(size_t bucketIndex, std::vector<H> &keyPointer) {
-        size_t pos = bucketIndex % capacity; // ToDo
+    void getAllKeysOfBucket(size_t bucketIndex, std::vector<H> &keysOfBucket) {
+        size_t pos = bucketIndex * capacity / bucketCount;
         H key;
-        while (occupiedKeys[pos] && getBucket((key = keys[pos])) != bucketIndex) pos = (pos + 1) % capacity;
-        if(!occupiedKeys[pos]) {
+        while (occupiedKeys[pos] && getBucket((key = keys[pos])) != bucketIndex)
+            pos = (pos + 1 == capacity) ? 0 : (pos + 1);
+        if (!occupiedKeys[pos]) {
             return;
         }
         do {
-            keyPointer.push_back(key);
-            pos = (pos + 1) % capacity;
-        } while (occupiedKeys[pos] && getBucket((key = keys[pos])) == bucketIndex);
+            if ((getBucket((key = keys[pos])) == bucketIndex)) {
+                keysOfBucket.push_back(key);
+            }
+            pos = (pos + 1 == capacity) ? 0 : (pos + 1);
+        } while (occupiedKeys[pos]);
+    }
+
+    void getAllKeyValuesOfBucketAndFree(size_t bucketIndex, std::vector<std::tuple<H, V>> &keyValuesOfBucket) {
+        std::vector<H> keysOfBucket;
+        getAllKeysOfBucket(bucketIndex, keysOfBucket);
+        for (const H &key: keysOfBucket) {
+            size_t slot = query(key);
+            occupiedValues[slot] = false;
+            keyValuesOfBucket.push_back({key, values[slot]});
+        }
+    }
+
+    size_t getBucketSize(size_t bucketIndex) {
+        std::vector<H> keysOfBucket;
+        getAllKeysOfBucket(bucketIndex, keysOfBucket);
+        return keysOfBucket.size();
+    }
+
+    uint64_t getCostOfBucket(size_t size) {
+        return 1 << (size << 1);
     }
 
     inline size_t getSlot(H h, S s) {
         auto i = s ^ h;
-        i = (i * i) >> 32;
-        return (i * capacity) >> 32;
-        //return fastmod_u32(uint32_t((i*i)>>32), slotM, capacity);
-        //return (i * i) >> slotShift;
+#ifdef POWER_OF_TWO_CAPACITY
+        return (i * i) >> slotShift;
+#else
+        return ((__uint128_t) (i*i)*capacity) >> 64;
+        //i = (i * i) >> 32;
+        //return (i * capacity) >> 32;
+#endif
     }
 
     inline size_t getBucket(H h) {
+#ifdef POWER_OF_TWO_CAPACITY
+        return h & bucketMask;
+#else
+        //return ((__uint128_t) h*bucketCount) >> 64;
         return (uint32_t(h) * bucketCount) >> 32;
-        //return fastmod_u32(uint32_t(h), bucketM, bucketCount);
-        //return h & bucketMask;
-    }
-
-    // build and swap
-    DynPerfectHashTable(const DynPerfectHashTable<H, V> &other) {
-    }
-
-    void rebuildAll() {
-        DynPerfectHashTable(this);
+#endif
     }
 
     void setCapacity(size_t keyCount) {
         n = keyCount;
+        auto cap = static_cast<size_t>(double(keyCount) / maxLoad);
+
+#ifdef POWER_OF_TWO_CAPACITY
         size_t power = 1;
         slotShift = 64;
-        auto cap = static_cast<size_t>(double(keyCount) / maxLoad);
-        /*while (power < cap) {
+        while (power < cap) {
             power *= 2;
             slotShift--;
         }
         capacity = power;
-        bucketCount = capacity >> lambda_log;*/
-
-        capacity = cap;
-        slotM = computeM_u32(cap);
-        bucketCount = cap / 4;
-        bucketM = computeM_u32(bucketCount);
-
+        bucketCount = capacity >> lambda_log;
         bucketMask = bucketCount - 1;
+#else
+        capacity = cap;
+        bucketCount = int(double(n + lambda) / lambda);
+#endif
         seeds.resize(bucketCount);
         keys.resize(capacity);
         values.resize(capacity);
+        bucketPointer.resize(capacity);
         occupiedValues.resize(capacity);
         occupiedKeys.resize(capacity);
     }
 
-    bool searchBucketHeuristically(const std::vector<std::tuple<H, V>> &pairs, size_t bucketIndex) {
+    bool searchBucketHeuristically(const std::vector<std::tuple<H, V>> &pairs, size_t bucketIndex, uint64_t recDepth) {
+        //std::cout << "HEURISTICALLY " << pairs.size() << " " << bucketIndex << " " << recDepth << std::endl;
+        S seed = recDepth == 0 ? 0 : uni(rng);
+        uint64_t selfCost = getCostOfBucket(pairs.size());
+        S prevS = seeds[bucketIndex];
+        S seedOfLowestCost;
+        std::vector<size_t> slots;
+        slots.resize(pairs.size());
+        uint64_t lowestCost = std::numeric_limits<uint64_t>::max();
+        for (uint64_t cnt = 0;
+             cnt < std::numeric_limits<S>::max(); cnt++, seed = (seed + 1) % std::numeric_limits<S>::max()) {
+            if (recDepth > 0 && seed == prevS) {
+                continue;
+            }
+            uint64_t currentSeedCost = 0;
+            for (size_t i = 0; i < pairs.size(); i++) {
+                const std::tuple<H, V> &p = pairs[i];
+                size_t slot = getSlot(std::get<0>(p), seed);
+                slots[i] = slot;
+                if (occupiedValues[slot]) {
+                    size_t otherBucketIndex = bucketPointer[slot];
+                    if (otherBucketIndex != bucketIndex) {
+                        currentSeedCost += getCostOfBucket(getBucketSize(otherBucketIndex));
+                        if (currentSeedCost > lowestCost) {
+                            break;
+                        }
+                    }
+                }
+            }
+            if (currentSeedCost < lowestCost) {
+                std::sort(slots.begin(), slots.end());
+                if (std::unique(slots.begin(), slots.end()) == slots.end()) {
+                    lowestCost = currentSeedCost;
+                    seedOfLowestCost = seed;
 
+                    if (currentSeedCost < 2 * selfCost) {
+                        break;
+                    }
+                }
+            }
+        }
+        if (lowestCost == std::numeric_limits<uint64_t>::max()) {
+            // all local collisions
+            return false;
+        }
+
+        // collect key value of other buckets
+        std::unordered_map<size_t, std::vector<std::tuple<H, V>>> savedBuckets;
+        for (size_t i = 0; i < pairs.size(); i++) {
+            const std::tuple<H, V> &p = pairs[i];
+            size_t slot = getSlot(std::get<0>(p), seedOfLowestCost);
+            if (occupiedValues[slot]) {
+                size_t otherBucketIndex = bucketPointer[slot];
+                if (otherBucketIndex != bucketIndex && !savedBuckets.contains(otherBucketIndex)) {
+                    std::vector<std::tuple<H, V>> keyValuesBucket;
+                    getAllKeyValuesOfBucketAndFree(otherBucketIndex, keyValuesBucket);
+                    savedBuckets[otherBucketIndex] = keyValuesBucket;
+                }
+            }
+        }
+
+        //insert self
+        for (size_t i = 0; i < pairs.size(); i++) {
+            const std::tuple<H, V> &p = pairs[i];
+            size_t slot = getSlot(std::get<0>(p), seedOfLowestCost);
+            occupiedValues[slot] = true;
+            values[slot] = std::get<1>(p);
+            bucketPointer[slot] = bucketIndex;
+        }
+        seeds[bucketIndex] = seedOfLowestCost;
+
+        //insert other
+        for (auto &it: savedBuckets) {
+            if (!searchBucketHeuristically(it.second, it.first, recDepth + 1)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     bool searchBucket(const std::vector<std::tuple<H, V>> &pairs, size_t bucketIndex) {
+        for (const auto &p: pairs) {
+            addToKeyStorage(std::get<0>(p), bucketIndex);
+        }
         std::vector<size_t> slots;
         slots.resize(pairs.size());
         for (S seed = 0; seed < std::numeric_limits<S>::max(); seed++) {
@@ -142,7 +256,6 @@ private:
                 for (size_t i = 0; i < pairs.size(); i++) {
                     const std::tuple<H, V> &p = pairs[i];
                     const size_t slot = slots[i];
-                    addToKeyStorage(std::get<0>(p), bucketIndex);
                     values[slot] = std::get<1>(p);
                 }
                 std::sort(slots.begin(), slots.end());
@@ -150,13 +263,13 @@ private:
                     seeds[bucketIndex] = seed;
                     for (const auto slot: slots) {
                         occupiedValues[slot] = true;
+                        bucketPointer[slot] = bucketIndex;
                     }
                     return true;
                 }
             }
         }
-        exit(111);
-        return false;
+        return searchBucketHeuristically(pairs, bucketIndex, 0);
     }
 
 public:
@@ -164,7 +277,7 @@ public:
 
     }
 
-    DynPerfectHashTable(std::vector<std::tuple<H, V>> pairs) {
+    DynPerfectHashTable(std::vector<std::tuple<H, V>> pairs) : rng(rd()) {
         std::vector<std::tuple<size_t, std::vector<std::tuple<H, V>>>> buckets;
         setCapacity(pairs.size());
         buckets.resize(bucketCount);
@@ -190,7 +303,7 @@ public:
             }
         }
 
-        std::cout << "Bits " << (sizeof(S) * 8 >> lambda_log) << std::endl;
+        std::cout << "Bits " << (sizeof(S) *8.0*double (bucketCount)/double(n) ) << std::endl;
         std::cout << "Load " << (double(n) / double(capacity)) << std::endl;
     }
 
